@@ -1,0 +1,9 @@
+node_modules/
+dist/
+
+# Pipeline runtime state (created in project directories)
+state.json
+.pipeline.log
+.baseline-failures.txt
+.baseline-gate.log
+progress.txt

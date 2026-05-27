@@ -1,0 +1,7 @@
+#!/bin/bash
+# Append co-author trailer if missing
+TRAILER="Co-authored-by: Yashiel Sookdeo <yashiel@skyner.co.za>"
+if ! grep -qF "$TRAILER" "$1"; then
+  echo "" >> "$1"
+  echo "$TRAILER" >> "$1"
+fi

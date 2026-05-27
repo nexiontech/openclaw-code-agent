@@ -1,0 +1,54 @@
+{
+  "id": "code-agent",
+  "name": "Code Agent",
+  "description": "Launch and manage Claude Code or Codex as background coding sessions. Orchestrate autonomous coding work with plan approval, worktree isolation, and lifecycle management.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "claudePath": {
+        "type": "string",
+        "description": "Path to Claude Code CLI binary. Default: \"claude\" (from PATH)."
+      },
+      "codexPath": {
+        "type": "string",
+        "description": "Path to Codex CLI binary. Default: \"codex\" (from PATH)."
+      },
+      "defaultHarness": {
+        "anyOf": [
+          {
+            "type": "string",
+            "const": "claude-code"
+          },
+          {
+            "type": "string",
+            "const": "codex"
+          }
+        ],
+        "description": "Default coding harness. Default: claude-code."
+      },
+      "defaultTimeoutSeconds": {
+        "type": "number",
+        "description": "Default session timeout in seconds. Default: 1800 (30 min)."
+      },
+      "worktreeBase": {
+        "type": "string",
+        "description": "Base directory for worktrees. Default: \"<repo>/.worktrees\"."
+      }
+    }
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "agent_launch",
+      "agent_output",
+      "agent_respond",
+      "agent_sessions",
+      "agent_kill",
+      "agent_merge",
+      "agent_pr"
+    ]
+  }
+}
