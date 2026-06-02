@@ -7,3 +7,5 @@ state.json
 .baseline-failures.txt
 .baseline-gate.log
 progress.txt
+
+.worktrees/
