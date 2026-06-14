@@ -9,3 +9,4 @@ state.json
 progress.txt
 
 .worktrees/
+.worktrees
