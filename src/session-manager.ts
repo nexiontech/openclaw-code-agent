@@ -8,12 +8,25 @@ export type SessionStatus =
   | "killed"
   | "timeout";
 
-/** Env vars that Claude Code uses as a nesting guard — must be stripped from child env. */
+/**
+ * Env vars that Claude Code uses as a nesting guard — must be stripped from
+ * the child process environment to prevent the spawned Claude Code binary from
+ * detecting a "nested session" and silently exiting.
+ *
+ * Verified live keys (current Claude Code): CLAUDECODE, CLAUDE_CODE_ENTRYPOINT,
+ * CLAUDE_CODE_SESSION_ID, CLAUDE_CODE_EXECPATH, CLAUDE_CODE_TMPDIR.
+ * CLAUDE_CODE_SESSION (no _ID) does NOT exist in current Claude Code but is
+ * kept here as a harmless no-op to cover any older or future variant.
+ *
+ * See: openclaw/openclaw#57858, openclaw/openclaw PR#87702.
+ */
 const CLAUDE_NESTING_VARS = [
   "CLAUDECODE",
-  "CLAUDE_CODE_SESSION",
   "CLAUDE_CODE_ENTRYPOINT",
-  "CLAUDE_CODE_SKIP_TELEMETRY_CONFIRM",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_SESSION", // no-op on current Claude Code; kept for compat
+  "CLAUDE_CODE_EXECPATH",
+  "CLAUDE_CODE_TMPDIR",
 ] as const;
 
 /** Maximum age in ms for completed sessions before they are pruned from memory. */
