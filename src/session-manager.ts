@@ -8,6 +8,19 @@ export type SessionStatus =
   | "killed"
   | "timeout";
 
+/** Env vars that Claude Code uses as a nesting guard — must be stripped from child env. */
+const CLAUDE_NESTING_VARS = [
+  "CLAUDECODE",
+  "CLAUDE_CODE_SESSION",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_SKIP_TELEMETRY_CONFIRM",
+] as const;
+
+/** Maximum age in ms for completed sessions before they are pruned from memory. */
+const SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 h
+/** How often to run the prune sweep. */
+const SESSION_PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 h
+
 export interface CodeSession {
   id: string;
   name: string;
@@ -52,19 +65,52 @@ export interface LaunchOptions {
 
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
+  private pruneTimer: ReturnType<typeof setInterval> | undefined;
+
+  constructor() {
+    // Prune stale completed sessions once per hour so the gateway process
+    // doesn't accumulate unbounded session state over multi-day runs.
+    this.pruneTimer = setInterval(
+      () => this.pruneStale(),
+      SESSION_PRUNE_INTERVAL_MS,
+    ).unref();
+  }
+
+  /** Remove completed/failed/killed/timed-out sessions older than SESSION_MAX_AGE_MS. */
+  private pruneStale(): void {
+    const cutoff = Date.now() - SESSION_MAX_AGE_MS;
+    for (const [id, session] of this.sessions) {
+      if (session.status !== "running" && session.endedAt && session.endedAt.getTime() < cutoff) {
+        this.sessions.delete(id);
+      }
+    }
+  }
+
+  /** Dispose the prune timer (e.g. in tests). */
+  dispose(): void {
+    if (this.pruneTimer !== undefined) {
+      clearInterval(this.pruneTimer);
+      this.pruneTimer = undefined;
+    }
+  }
 
   async launch(opts: LaunchOptions): Promise<CodeSession> {
     const id = randomUUID().slice(0, 8);
 
+    // Build the child environment: inherit parent env but strip Claude Code
+    // nesting markers so the child claude binary does not treat itself as a
+    // nested session and silently exit.  See openclaw/openclaw#57858.
+    const childEnv: NodeJS.ProcessEnv = { ...process.env };
+    for (const key of CLAUDE_NESTING_VARS) {
+      delete childEnv[key];
+    }
+    childEnv["CI"] = "true";
+    childEnv["TERM"] = "dumb";
+
     const child = spawn(opts.command, opts.args, {
       cwd: opts.workdir,
       stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        // Ensure non-interactive mode
-        CI: "true",
-        TERM: "dumb",
-      },
+      env: childEnv,
       detached: false,
     });
 

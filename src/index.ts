@@ -11,11 +11,13 @@ const HarnessEnum = Type.Union([
 
 const PermissionModeEnum = Type.Union([
   Type.Literal("bypassPermissions"),
+  Type.Literal("plan"),
   Type.Literal("default"),
 ]);
 
 const WorktreeStrategyEnum = Type.Union([
   Type.Literal("auto"),
+  Type.Literal("delegate"), // alias for "auto" — the plugin creates the worktree
   Type.Literal("off"),
 ]);
 
@@ -96,15 +98,15 @@ export default defineToolPlugin({
           ),
         ),
         worktree_strategy: Type.Optional(
-          Type.Union([Type.Literal("auto"), Type.Literal("off")], {
+          Type.Union([Type.Literal("auto"), Type.Literal("delegate"), Type.Literal("off")], {
             description:
-              '"auto" creates a git worktree, "off" works in the given workdir. Default: "off".',
+              '"auto"/"delegate" creates a git worktree for isolation, "off" works in the given workdir. Default: "off".',
           }),
         ),
         branch: Type.Optional(
           Type.String({
             description:
-              "Git branch to checkout/create. Required when worktree_strategy is auto.",
+              'Git branch to checkout/create. Required when worktree_strategy is "auto" or "delegate".',
           }),
         ),
         timeout_seconds: Type.Optional(
@@ -118,13 +120,23 @@ export default defineToolPlugin({
               'Model override, e.g. "claude-opus-4-6" or "o3". Passed to the CLI.',
           }),
         ),
+        worktree_pr_target_repo: Type.Optional(
+          Type.String({
+            description:
+              'Target repo for PRs in fork workflows, e.g. "owner/repo". Passed to agent_pr.',
+          }),
+        ),
       }),
       async execute(params, config) {
         const harness =
           params.harness ?? config.defaultHarness ?? "claude-code";
         const permissionMode =
           params.permission_mode ?? "bypassPermissions";
-        const worktreeStrategy = params.worktree_strategy ?? "off";
+        // Normalise "delegate" → "auto": both mean the plugin manages the worktree.
+        const worktreeStrategy =
+          params.worktree_strategy === "delegate"
+            ? "auto"
+            : (params.worktree_strategy ?? "off");
         const timeoutSeconds =
           params.timeout_seconds ??
           config.defaultTimeoutSeconds ??
@@ -136,7 +148,15 @@ export default defineToolPlugin({
         let effectiveWorkdir = params.workdir;
 
         // Handle worktree creation
-        if (worktreeStrategy === "auto" && params.branch) {
+        if (worktreeStrategy === "auto") {
+          // Guard: a branch name is mandatory for worktree isolation.
+          if (!params.branch) {
+            return {
+              error:
+                'worktree_strategy "auto"/"delegate" requires a "branch" parameter.',
+            };
+          }
+
           const { execSync } = await import("node:child_process");
           const worktreeBase =
             config.worktreeBase ?? `${params.workdir}/.worktrees`;
@@ -149,7 +169,7 @@ export default defineToolPlugin({
               { stdio: "pipe" },
             );
           } catch {
-            // Worktree may already exist
+            // Worktree may already exist — continue if the path is there
             const { existsSync } = await import("node:fs");
             if (!existsSync(effectiveWorkdir)) {
               return {
@@ -166,8 +186,15 @@ export default defineToolPlugin({
         if (harness === "claude-code") {
           command = claudePath;
           args = ["--print"];
-          if (permissionMode === "bypassPermissions") {
+          // Use string cast to prevent TS narrowing from rejecting the "plan"
+          // branch when typebox doesn't emit a proper TS union for the schema.
+          const pm = permissionMode as string;
+          if (pm === "bypassPermissions") {
             args.unshift("--dangerously-skip-permissions");
+          } else if (pm === "plan") {
+            // Plan mode: Claude Code proposes a plan and waits for approval before
+            // executing any tools.  Useful for gated autonomous dispatch.
+            args.push("--permission-mode", "plan");
           }
           if (params.model) {
             args.push("--model", params.model);
@@ -204,6 +231,7 @@ export default defineToolPlugin({
           name: session.name,
           harness,
           workdir: effectiveWorkdir,
+          worktree_pr_target_repo: params.worktree_pr_target_repo,
           status: session.status,
           message: `Launched ${harness} session "${params.name}" (${session.id}). Use agent_output to check progress.`,
         };
