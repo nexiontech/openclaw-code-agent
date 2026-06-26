@@ -149,23 +149,31 @@ export default defineToolPlugin({
 
         // Handle worktree creation
         if (worktreeStrategy === "auto") {
-          // Guard: a branch name is mandatory for worktree isolation.
-          if (!params.branch) {
+          // For "auto" strategy: branch is mandatory — caller controls the branch name.
+          // For "delegate" strategy (normalised to "auto" above): auto-derive from session name
+          // when branch is not provided, matching how the skill uses `worktree_strategy: "delegate"`.
+          const effectiveBranch =
+            params.branch ??
+            (params.worktree_strategy === "delegate"
+              ? `agent/${params.name.replace(/[^a-zA-Z0-9-_]/g, "-")}`
+              : undefined);
+
+          if (!effectiveBranch) {
             return {
               error:
-                'worktree_strategy "auto"/"delegate" requires a "branch" parameter.',
+                'worktree_strategy "auto" requires a "branch" parameter. Use "delegate" to auto-derive the branch from the session name.',
             };
           }
 
           const { execSync } = await import("node:child_process");
           const worktreeBase =
             config.worktreeBase ?? `${params.workdir}/.worktrees`;
-          const slug = params.branch.replace(/[^a-zA-Z0-9-_]/g, "-");
+          const slug = effectiveBranch.replace(/[^a-zA-Z0-9-_]/g, "-");
           effectiveWorkdir = `${worktreeBase}/${slug}`;
 
           try {
             execSync(
-              `git -C "${params.workdir}" worktree add "${effectiveWorkdir}" -b "${params.branch}" 2>/dev/null || git -C "${params.workdir}" worktree add "${effectiveWorkdir}" "${params.branch}"`,
+              `git -C "${params.workdir}" worktree add "${effectiveWorkdir}" -b "${effectiveBranch}" 2>/dev/null || git -C "${params.workdir}" worktree add "${effectiveWorkdir}" "${effectiveBranch}"`,
               { stdio: "pipe" },
             );
           } catch {
@@ -550,6 +558,162 @@ export default defineToolPlugin({
             error: `PR creation failed: ${err instanceof Error ? err.message : String(err)}`,
           };
         }
+      },
+    }),
+
+    // ─── agent_worktree_status ───
+    tool({
+      name: "agent_worktree_status",
+      description:
+        "List all git worktrees in a repo and their associated session lifecycle state.",
+      parameters: Type.Object({
+        workdir: Type.String({
+          description: "Absolute path to the repo root.",
+        }),
+      }),
+      async execute({ workdir }) {
+        const { execSync } = await import("node:child_process");
+        try {
+          const raw = execSync("git worktree list --porcelain", {
+            cwd: workdir,
+            encoding: "utf-8",
+          });
+
+          // Parse porcelain output into structured records
+          const worktrees: Array<{
+            path: string;
+            branch: string | null;
+            commit: string | null;
+            bare: boolean;
+          }> = [];
+
+          let current: { path?: string; branch?: string; commit?: string; bare?: boolean } = {};
+          for (const line of raw.split("\n")) {
+            if (line.startsWith("worktree ")) {
+              if (current.path) worktrees.push({ path: current.path, branch: current.branch ?? null, commit: current.commit ?? null, bare: current.bare ?? false });
+              current = { path: line.slice("worktree ".length).trim() };
+            } else if (line.startsWith("HEAD ")) {
+              current.commit = line.slice("HEAD ".length).trim();
+            } else if (line.startsWith("branch ")) {
+              current.branch = line.slice("branch refs/heads/".length).trim();
+            } else if (line === "bare") {
+              current.bare = true;
+            }
+          }
+          if (current.path) worktrees.push({ path: current.path, branch: current.branch ?? null, commit: current.commit ?? null, bare: current.bare ?? false });
+
+          // Enrich with session data
+          const sessions = sessionManager.list(true);
+          const enriched = worktrees.map((wt) => {
+            const linked = sessions.find((s) => s.worktreePath === wt.path);
+            return {
+              ...wt,
+              session_id: linked?.id ?? null,
+              session_status: linked?.status ?? null,
+            };
+          });
+
+          return { count: enriched.length, worktrees: enriched };
+        } catch (err) {
+          return {
+            error: `Failed to list worktrees: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+      },
+    }),
+
+    // ─── agent_worktree_cleanup ───
+    tool({
+      name: "agent_worktree_cleanup",
+      description:
+        "Remove completed/failed/killed worktrees from a repo. By default, only removes worktrees whose associated session has ended.",
+      parameters: Type.Object({
+        workdir: Type.String({
+          description: "Absolute path to the repo root.",
+        }),
+        force: Type.Optional(
+          Type.Boolean({
+            description:
+              "Also remove worktrees whose session is still running. Default: false.",
+          }),
+        ),
+      }),
+      async execute({ workdir, force }) {
+        const { execSync } = await import("node:child_process");
+        const sessions = sessionManager.list(true);
+
+        const raw = execSync("git worktree list --porcelain", {
+          cwd: workdir,
+          encoding: "utf-8",
+        });
+
+        const worktreePaths: string[] = [];
+        for (const line of raw.split("\n")) {
+          if (line.startsWith("worktree ")) {
+            worktreePaths.push(line.slice("worktree ".length).trim());
+          }
+        }
+
+        const removed: string[] = [];
+        const skipped: string[] = [];
+
+        for (const wtPath of worktreePaths.slice(1)) {
+          // Skip the main worktree (first entry)
+          const linked = sessions.find((s) => s.worktreePath === wtPath);
+          const canRemove = !linked || linked.status !== "running" || force === true;
+
+          if (!canRemove) {
+            skipped.push(wtPath);
+            continue;
+          }
+
+          try {
+            execSync(`git worktree remove "${wtPath}" --force`, {
+              cwd: workdir,
+              stdio: "pipe",
+            });
+            removed.push(wtPath);
+          } catch {
+            skipped.push(wtPath);
+          }
+        }
+
+        return {
+          removed_count: removed.length,
+          skipped_count: skipped.length,
+          removed,
+          skipped,
+        };
+      },
+    }),
+
+    // ─── agent_stats ───
+    tool({
+      name: "agent_stats",
+      description:
+        "Return usage and runtime statistics for all coding sessions in this gateway process lifecycle.",
+      parameters: Type.Object({}),
+      async execute() {
+        const all = sessionManager.list(true);
+
+        const byStatus: Record<string, number> = {};
+        let totalRuntimeSeconds = 0;
+        const byHarness: Record<string, number> = { "claude-code": 0, codex: 0 };
+
+        for (const s of all) {
+          byStatus[s.status] = (byStatus[s.status] ?? 0) + 1;
+          totalRuntimeSeconds += s.runtimeSeconds;
+          byHarness[s.harness] = (byHarness[s.harness] ?? 0) + 1;
+        }
+
+        return {
+          total_sessions: all.length,
+          by_status: byStatus,
+          by_harness: byHarness,
+          total_runtime_seconds: totalRuntimeSeconds,
+          average_runtime_seconds:
+            all.length > 0 ? Math.round(totalRuntimeSeconds / all.length) : 0,
+        };
       },
     }),
   ],

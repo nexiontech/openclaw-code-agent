@@ -10,6 +10,9 @@ const EXPECTED_TOOLS = [
   "agent_kill",
   "agent_merge",
   "agent_pr",
+  "agent_worktree_status",
+  "agent_worktree_cleanup",
+  "agent_stats",
 ];
 
 describe("code-agent", () => {
